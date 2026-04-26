@@ -247475,14 +247475,7 @@
         "latitude": "3.754722",
         "longitude": "-71.458056",
         "name": "Morelia Airport",
-        "routes": [
-            {
-                "carriers": [],
-                "iata": "BOG",
-                "km": 315,
-                "min": 80
-            }
-        ],
+        "routes": [],
         "timezone": "America/Bogota"
     },
     "MSL": {
