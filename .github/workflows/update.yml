@@ -25,14 +25,23 @@ jobs:
           printf '%s\n' "${{ secrets.WIREGUARD_CONF }}" \
             | grep -vi '^[[:space:]]*DNS' | sudo tee /etc/wireguard/wg0.conf >/dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
+          # The tunnel routes IPv4 only (AllowedIPs 0.0.0.0/0). GitHub runners
+          # have native IPv6, so curl's happy-eyeballs can leak out the runner's
+          # datacenter IPv6 and get Cloudflare-blocked. Disable IPv6 so ALL
+          # traffic (incl. the scraper's) is forced through the v4 tunnel.
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
           sudo wg-quick up wg0
-          # confirm the tunnel gives a working exit WITHOUT leaking the home IP
-          # into this public repo's logs: just check flightsfrom is reachable.
-          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 \
+          sleep 3
+          hs=$(sudo wg show wg0 latest-handshakes | awk '{print $2}' | head -1)
+          echo "WireGuard handshake: $([ "${hs:-0}" -gt 0 ] && echo OK || echo NONE)"
+          # ISP name only (no IP) — confirms residential vs datacenter exit.
+          echo "Exit ISP: $(curl -4 -s --max-time 20 https://ipinfo.io/org || echo unknown)"
+          code=$(curl -4 -s -o /dev/null -w '%{http_code}' --max-time 25 \
             https://www.flightsfrom.com/airports || echo "000")
-          echo "Tunnel up. flightsfrom /airports -> HTTP $code (200 = residential exit OK)"
+          echo "flightsfrom /airports -> HTTP $code (200 = residential exit OK)"
           if [ "$code" != "200" ]; then
-            echo "::error::flightsfrom returned $code — tunnel exit is not clearing Cloudflare"
+            echo "::error::exit not clearing Cloudflare (see handshake/ISP above)"
             exit 1
           fi
 
