@@ -115,23 +115,39 @@ if __name__ == "__main__":
 
         routes = []
         for route in metadata["routes"]:
-            carrier_fields = [
-                "name",
-                "IATA",
-            ]
-
             carriers = []
             for aroute in route["airlineroutes"]:
+                airline = aroute["airline"]
                 is_passenger = (
-                    str(aroute["airline"]["is_scheduled_passenger"]) == "1"
-                    or str(aroute["airline"]["is_nonscheduled_passenger"]) == "1"
+                    str(airline["is_scheduled_passenger"]) == "1"
+                    or str(airline["is_nonscheduled_passenger"]) == "1"
                 )
-                is_active = str(aroute["airline"]["active"]) == "1"
+                is_active = str(airline["active"]) == "1"
                 if is_active and is_passenger:
+                    # flightsfrom gives no per-carrier frequency (only the route
+                    # total), but it does carry per-carrier ICAO + classification
+                    # flags — capture them so carriers are keyed to their
+                    # operating ICAO and pre-classified downstream.
+                    if str(airline.get("is_staralliance")) == "1":
+                        alliance = "staralliance"
+                    elif str(airline.get("is_oneworld")) == "1":
+                        alliance = "oneworld"
+                    elif str(airline.get("is_skyteam")) == "1":
+                        alliance = "skyteam"
+                    else:
+                        alliance = None
                     carriers.append(
                         {
-                            field.lower(): aroute["airline"][field]
-                            for field in carrier_fields
+                            "name": airline["name"],
+                            "iata": airline["IATA"],
+                            "icao": airline.get("ICAO"),
+                            "is_lowcost": str(airline.get("is_lowcost")) == "1",
+                            "is_cargo": str(airline.get("is_cargo")) == "1",
+                            "is_scheduled_passenger":
+                                str(airline.get("is_scheduled_passenger")) == "1",
+                            "alliance": alliance,
+                            "flights_last_24_hours":
+                                int(airline.get("flights_last_24_hours") or 0),
                         }
                     )
 
@@ -153,6 +169,7 @@ if __name__ == "__main__":
                 {
                     "carriers": carriers,
                     "flights_per_week": int(route.get("flights_per_week") or 0),
+                    "passengers_per_day": int(route.get("passengers_per_day") or 0),
                     "km": distance,
                     "min": int(route["common_duration"]),
                     "iata": route["iata_to"],
