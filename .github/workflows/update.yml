@@ -1,27 +1,54 @@
 name: Update airline route data
-on: 
+on:
   schedule:
     - cron: '0 0 * * 0'
   workflow_dispatch:
 jobs:
   scrape-and-commit:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      # flightsfrom sits behind Cloudflare, which blocks datacenter IPs (incl.
+      # GitHub runners). Route the runner through a home WireGuard tunnel so it
+      # exits from a residential IP that Cloudflare waves through. The whole
+      # client config is stored in the WIREGUARD_CONF repo secret.
+      - name: Connect home WireGuard (residential exit IP)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard-tools
+          # write config, drop DNS= lines (avoids needing resolvconf on runner)
+          printf '%s\n' "${{ secrets.WIREGUARD_CONF }}" \
+            | grep -vi '^[[:space:]]*DNS' | sudo tee /etc/wireguard/wg0.conf >/dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+          echo "Tunnel up. Exit IP: $(curl -s --max-time 20 https://ipinfo.io/ip)"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+
       - name: Scrape and commit
         run: |
-          uv run --python 3.10 --with-requirements requirements.txt -- python -u scrape_airline_routes.py
+          uv run --python 3.10 --with-requirements requirements.txt -- \
+            python -u scrape_airline_routes.py
 
           git config --global user.email "bot@jonty.co.uk"
           git config --global user.name "Airline Route Update GHA"
-
           git add airline_routes.json
-          git commit -m "Automatic airline route update"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Automatic airline route update"
+          fi
+
+      - name: Disconnect WireGuard
+        if: always()
+        run: sudo wg-quick down wg0 || true
+
       - name: Push changes
         uses: ad-m/github-push-action@master
         with:
