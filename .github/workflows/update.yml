@@ -13,6 +13,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       # flightsfrom sits behind Cloudflare, which blocks datacenter IPs (incl.
       # GitHub runners). Route the runner through a home WireGuard tunnel so it
       # exits from a residential IP that Cloudflare waves through. The whole
@@ -26,8 +29,8 @@ jobs:
             | grep -vi '^[[:space:]]*DNS' | sudo tee /etc/wireguard/wg0.conf >/dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
           # The tunnel routes IPv4 only (AllowedIPs 0.0.0.0/0). GitHub runners
-          # have native IPv6, so curl's happy-eyeballs can leak out the runner's
-          # datacenter IPv6 and get Cloudflare-blocked. Disable IPv6 so ALL
+          # have native IPv6, so traffic can leak out the runner's native
+          # (datacenter) IPv6 and get Cloudflare-blocked. Disable IPv6 so ALL
           # traffic (incl. the scraper's) is forced through the v4 tunnel.
           sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
           sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
@@ -37,16 +40,10 @@ jobs:
           echo "WireGuard handshake: $([ "${hs:-0}" -gt 0 ] && echo OK || echo NONE)"
           # ISP name only (no IP) — confirms residential vs datacenter exit.
           echo "Exit ISP: $(curl -4 -s --max-time 20 https://ipinfo.io/org || echo unknown)"
-          code=$(curl -4 -s -o /dev/null -w '%{http_code}' --max-time 25 \
-            https://www.flightsfrom.com/airports || echo "000")
-          echo "flightsfrom /airports -> HTTP $code (200 = residential exit OK)"
-          if [ "$code" != "200" ]; then
-            echo "::error::exit not clearing Cloudflare (see handshake/ISP above)"
-            exit 1
-          fi
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+          # Real Cloudflare test: curl_cffi with Chrome's TLS fingerprint, like
+          # the scraper. Plain curl is fingerprint-blocked even from a
+          # residential IP, so it would be a false negative here.
+          uv run --python 3.10 --with curl_cffi python -c "import sys; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code); sys.exit(0 if r.status_code==200 else 1)"
 
       - name: Scrape and commit
         run: |
