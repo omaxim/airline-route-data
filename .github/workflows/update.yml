@@ -26,7 +26,15 @@ jobs:
             | grep -vi '^[[:space:]]*DNS' | sudo tee /etc/wireguard/wg0.conf >/dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
-          echo "Tunnel up. Exit IP: $(curl -s --max-time 20 https://ipinfo.io/ip)"
+          # confirm the tunnel gives a working exit WITHOUT leaking the home IP
+          # into this public repo's logs: just check flightsfrom is reachable.
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 25 \
+            https://www.flightsfrom.com/airports || echo "000")
+          echo "Tunnel up. flightsfrom /airports -> HTTP $code (200 = residential exit OK)"
+          if [ "$code" != "200" ]; then
+            echo "::error::flightsfrom returned $code — tunnel exit is not clearing Cloudflare"
+            exit 1
+          fi
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
