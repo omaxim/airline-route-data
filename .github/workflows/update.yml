@@ -43,7 +43,7 @@ jobs:
           # Real Cloudflare test: curl_cffi with Chrome's TLS fingerprint, like
           # the scraper. Plain curl is fingerprint-blocked even from a
           # residential IP, so it would be a false negative here.
-          uv run --python 3.10 --with curl_cffi python -c "import sys; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code); sys.exit(0 if r.status_code==200 else 1)"
+          uv run --python 3.10 --with curl_cffi --with typing_extensions python -c "import sys; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code); sys.exit(0 if r.status_code==200 else 1)"
 
       - name: Scrape and commit
         run: |
