@@ -122,8 +122,13 @@ if __name__ == "__main__":
                     str(airline["is_scheduled_passenger"]) == "1"
                     or str(airline["is_nonscheduled_passenger"]) == "1"
                 )
+                # Pure freighters (FedEx, UPS, Atlas, Kalitta, Cargolux) carry
+                # neither passenger flag, so they were dropped from every route
+                # list. They fly the routes; admit them and let consumers split
+                # on the is_cargo flag already captured below.
+                is_cargo = str(airline.get("is_cargo")) == "1"
                 is_active = str(airline["active"]) == "1"
-                if is_active and is_passenger:
+                if is_active and (is_passenger or is_cargo):
                     # flightsfrom gives no per-carrier frequency (only the route
                     # total), but it does carry per-carrier ICAO + classification
                     # flags — capture them so carriers are keyed to their
