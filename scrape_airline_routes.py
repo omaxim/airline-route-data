@@ -60,7 +60,19 @@ HORIZON_DAYS = 330                    # the site's schedules reach ~11 months ah
 FORMAT = "flightsfrom-departures-2026-10"
 MAX_ATTEMPTS = 4          # per page
 MAX_FAILED_SHARE = 0.03   # a day with more failed airports than this is not saved
-PAUSE = 1.0               # seconds between pages
+PAUSE = 1.0               # seconds between pages, ONE stream only (the pace the weekly scraper
+                          # ran at for years); 7 parallel streams (~5 pages/s) got this
+                          # scraper's IP blocked on 12 Oct 2026
+DEADLINE = float(os.environ.get("SCRAPE_DEADLINE") or 0)   # epoch seconds: stop cleanly before it
+CHECKPOINT = 200          # save progress every N airports, so a stop loses nothing
+
+
+class Blocked(Exception):
+    """The site refused us (403/429): stop everything, never retry against a block."""
+
+
+class OutOfTime(Exception):
+    """SCRAPE_DEADLINE reached: save what we have and stop (the next run resumes)."""
 
 
 def clean_coord_str(val):
@@ -94,6 +106,8 @@ def board(session, iata, date):
             r = session.get(url, timeout=60)
             if r.status_code == 404:
                 return []
+            if r.status_code in (403, 429):
+                raise Blocked(f"{iata} {date}: HTTP {r.status_code}")
             if r.status_code == 200:
                 root = lxml.html.document_fromstring(r.content)
                 if root.xpath('//*[@data-left-list]'):
@@ -111,29 +125,69 @@ def board(session, iata, date):
                 print(f"! {iata} {date}: no departures list on the page (attempt {attempt}/{MAX_ATTEMPTS})")
             else:
                 print(f"! {iata} {date}: HTTP {r.status_code} (attempt {attempt}/{MAX_ATTEMPTS})")
+        except Blocked:
+            raise
         except Exception as e:
             print(f"! {iata} {date}: {e} (attempt {attempt}/{MAX_ATTEMPTS})")
         time.sleep(5 * attempt)
     return None
 
 
+def _save(path, date, flights, failed, partial):
+    tmp = path.with_suffix(".tmp")
+    with gzip.open(tmp, "wt", encoding="utf-8") as f:
+        json.dump({"date": date, "format": FORMAT, "failed": sorted(failed), "flights": flights,
+                   **({"partial": True} if partial else {})}, f, separators=(",", ":"))
+    tmp.replace(path)
+
+
 def scrape_day(session, listed, date, only=None, out_dir=None):
+    """One date's board for every airport. Resumes from a saved partial file, checkpoints
+    every CHECKPOINT airports, and stops at once if the site blocks us (the partial file
+    stays, to be resumed by the next run)."""
+    out = out_dir or DAYS
+    out.mkdir(exist_ok=True)
+    path = out / (f"{date}.json.gz" if not only else f"{date}_sample.json.gz")
+    part = out / f"{date}.partial.json.gz"
+    flights, failed = {}, []
+    if part.exists() and not only:
+        prev = json.load(gzip.open(part, "rt", encoding="utf-8"))
+        flights, failed = prev["flights"], prev["failed"]
+        print(f"{date}: resuming, {len(flights)} airports already done")
+    seen = set(flights) | set(failed)
     queue = list(only or [i for i, a in listed.items() if a.get("no_routes", 1)])
-    flights, failed, seen = {}, [], set()
+    for rows in flights.values():
+        queue.extend(d for d, *_ in rows)
+    blocked = None
     while queue:
         iata = queue.pop()
         if iata in seen:
             continue
         seen.add(iata)
         print(f"{date} #{len(flights)}: {iata}")
-        rows = board(session, iata, date)
+        try:
+            if DEADLINE and time.time() > DEADLINE:
+                raise OutOfTime(f"deadline reached at {iata}")
+            rows = board(session, iata, date)
+        except (Blocked, OutOfTime) as e:
+            seen.discard(iata)
+            blocked = e
+            break
         if rows is None:
             failed.append(iata)
             continue
         flights[iata] = rows
         if not only:   # destinations the list does not name still get their own board
             queue.extend(d for d, *_ in rows if d not in seen)
+        if not only and len(flights) % CHECKPOINT == 0:
+            _save(part, date, flights, failed, partial=True)
         time.sleep(PAUSE)
+    if blocked:
+        if not only:
+            _save(part, date, flights, failed, partial=True)
+        print(f"{'OUT OF TIME' if isinstance(blocked, OutOfTime) else 'BLOCKED'} ({blocked}): stopping; "
+              f"{len(flights)} airports kept in {part.name} for the next run")
+        raise blocked
     n = sum(len(v) for v in flights.values())
     print(f"{date}: {len(flights)} airports, {n} departures, {len(failed)} failed")
     if failed:
@@ -141,12 +195,8 @@ def scrape_day(session, listed, date, only=None, out_dir=None):
     if not only and len(failed) / max(len(seen), 1) > MAX_FAILED_SHARE:
         print(f"{date}: too many failures ({len(failed)}/{len(seen)}), not saved")
         return False
-    out = out_dir or DAYS
-    out.mkdir(exist_ok=True)
-    path = out / (f"{date}.json.gz" if not only else f"{date}_sample.json.gz")
-    with gzip.open(path, "wt", encoding="utf-8") as f:
-        json.dump({"date": date, "format": FORMAT, "failed": sorted(failed), "flights": flights}, f,
-                  separators=(",", ":"))
+    _save(path, date, flights, failed, partial=False)
+    part.unlink(missing_ok=True)
     return True
 
 
@@ -295,12 +345,26 @@ if __name__ == "__main__":
         forward_assemble()
         sys.exit(0)
     if cmd == "forward-day":
-        ok = all([scrape_day(session, listed, d, only, out_dir=FORWARD_DAYS) for d in args[1:]])
+        try:
+            ok = all([scrape_day(session, listed, d, only, out_dir=FORWARD_DAYS) for d in args[1:]])
+        except Blocked:
+            sys.stdout.flush()
+            os._exit(3)
+        except OutOfTime:
+            sys.stdout.flush()
+            os._exit(4)
         sys.stdout.flush()
         os._exit(0 if ok else 1)
     if cmd == "day":
         dates = args[1:] or [(dt.date.today() + dt.timedelta(7)).isoformat()]
-        ok = all([scrape_day(session, listed, d, only) for d in dates])
+        try:
+            ok = all([scrape_day(session, listed, d, only) for d in dates])
+        except Blocked:
+            sys.stdout.flush()
+            os._exit(3)            # 3 = blocked: the workflow stops, no further dates
+        except OutOfTime:
+            sys.stdout.flush()
+            os._exit(4)            # 4 = out of time: partial saved, resumed next run
         sys.stdout.flush()
         os._exit(0 if ok else 1)   # curl_cffi can hang the interpreter at shutdown
     if cmd == "assemble":
