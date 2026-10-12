@@ -51,7 +51,9 @@ jobs:
           hs=$(sudo wg show wg0 latest-handshakes | awk '{print $2}' | head -1)
           echo "WireGuard handshake: $([ "${hs:-0}" -gt 0 ] && echo OK || echo NONE)"
           echo "Exit ISP: $(curl -4 -s --max-time 20 https://ipinfo.io/org || echo unknown)"
-          uv run --python 3.10 --with curl_cffi --with typing_extensions python -c "import sys; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code); sys.exit(0 if r.status_code==200 else 1)"
+          # os._exit: curl_cffi can leave the interpreter hanging at shutdown (12 Oct: the
+          # check printed HTTP 200 and then held the step for 28 minutes)
+          timeout 120 uv run --python 3.10 --with curl_cffi --with typing_extensions python -c "import os; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code, flush=True); os._exit(0 if r.status_code==200 else 1)"
 
       - name: Scrape the day(s)
         run: |
