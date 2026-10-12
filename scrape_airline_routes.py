@@ -26,6 +26,7 @@ from collections import defaultdict
 import datetime as dt
 import gzip
 import json
+import os
 import re
 import statistics
 import sys
@@ -194,7 +195,8 @@ if __name__ == "__main__":
     if cmd == "day":
         dates = args[1:] or [(dt.date.today() + dt.timedelta(7)).isoformat()]
         ok = all([scrape_day(session, listed, d, only) for d in dates])
-        sys.exit(0 if ok else 1)
+        sys.stdout.flush()
+        os._exit(0 if ok else 1)   # curl_cffi can hang the interpreter at shutdown
     if cmd == "assemble":
         files = sorted(p for p in DAYS.glob("????-??-??.json.gz"))[-7:]
         days = [json.load(gzip.open(p, "rt", encoding="utf-8")) for p in files]
@@ -204,5 +206,6 @@ if __name__ == "__main__":
               f"{sum(r['flights_per_week'] for a in airports.values() for r in a['routes']):,} flights")
         with open("airline_routes.json", "w") as f:
             f.write(json.dumps(airports, indent=4, sort_keys=True, separators=(",", ": ")))
-        sys.exit(0)
+        sys.stdout.flush()
+        os._exit(0)
     sys.exit(__doc__)
