@@ -18,6 +18,21 @@ that day with its flight number, operating airline (IATA code) and destination. 
     python scrape_airline_routes.py day 2026-10-14 --only PRG FRA
         a few airports, for testing.
 
+The site also publishes schedules about 11 months ahead. The forward schedule is
+sampled one full week (Monday to Sunday, from the first Monday on or after the 8th)
+per month and refreshed on a rolling basis, a few dates a day:
+
+    python scrape_airline_routes.py forward-plan [N]
+        prints the N forward dates due next: never scraped first, then the oldest
+        scrape (state in forward/state.json).
+    python scrape_airline_routes.py forward-done DATE [DATE ...]
+        records those dates as scraped (after their boards were saved to forward_days/),
+        and appends each board's totals to forward/completeness.csv: the same future
+        date scraped at shrinking lead times measures how complete far schedules are.
+    python scrape_airline_routes.py forward-assemble
+        every complete sample week in forward_days/ -> forward/routes_by_month.csv.gz
+        (week_start, origin, destination, carrier, flights in that week).
+
 A page that fails is retried a bounded number of times, then skipped and logged; a day
 with too many failed airports is not saved, so a site change can no longer hang the job
 or leave a partial week behind.
@@ -39,6 +54,9 @@ import lxml.html
 
 BASE = "https://www.flightsfrom.com"
 DAYS = Path("days")
+FORWARD_DAYS = Path("forward_days")   # boards of forward dates (kept out of git: a release asset)
+FORWARD = Path("forward")             # state.json, completeness.csv, routes_by_month.csv.gz
+HORIZON_DAYS = 330                    # the site's schedules reach ~11 months ahead
 FORMAT = "flightsfrom-departures-2026-10"
 MAX_ATTEMPTS = 4          # per page
 MAX_FAILED_SHARE = 0.03   # a day with more failed airports than this is not saved
@@ -99,7 +117,7 @@ def board(session, iata, date):
     return None
 
 
-def scrape_day(session, listed, date, only=None):
+def scrape_day(session, listed, date, only=None, out_dir=None):
     queue = list(only or [i for i, a in listed.items() if a.get("no_routes", 1)])
     flights, failed, seen = {}, [], set()
     while queue:
@@ -123,8 +141,9 @@ def scrape_day(session, listed, date, only=None):
     if not only and len(failed) / max(len(seen), 1) > MAX_FAILED_SHARE:
         print(f"{date}: too many failures ({len(failed)}/{len(seen)}), not saved")
         return False
-    DAYS.mkdir(exist_ok=True)
-    path = DAYS / (f"{date}.json.gz" if not only else f"{date}_sample.json.gz")
+    out = out_dir or DAYS
+    out.mkdir(exist_ok=True)
+    path = out / (f"{date}.json.gz" if not only else f"{date}_sample.json.gz")
     with gzip.open(path, "wt", encoding="utf-8") as f:
         json.dump({"date": date, "format": FORMAT, "failed": sorted(failed), "flights": flights}, f,
                   separators=(",", ":"))
@@ -183,6 +202,80 @@ def assemble(listed, days):
     return airports
 
 
+def forward_targets(today=None):
+    """One Monday-to-Sunday week per month, from the first Monday on or after the 8th,
+    for every month whose week starts beyond the near-term week and within the horizon."""
+    today = today or dt.date.today()
+    out, y, m = [], today.year, today.month
+    for _ in range(13):
+        d = dt.date(y, m, 8)
+        start = d + dt.timedelta((7 - d.weekday()) % 7)
+        if start > today + dt.timedelta(8) and start + dt.timedelta(6) <= today + dt.timedelta(HORIZON_DAYS):
+            out += [(start + dt.timedelta(i)).isoformat() for i in range(7)]
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def _state():
+    p = FORWARD / "state.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def forward_plan(n):
+    state = _state()
+    targets = forward_targets()
+    # never scraped first (nearest first), then the least recently scraped
+    return sorted(targets, key=lambda d: (bool(state.get(d)), (state.get(d) or [""])[-1], d))[:n]
+
+
+def forward_done(dates):
+    FORWARD.mkdir(exist_ok=True)
+    state, today = _state(), dt.date.today().isoformat()
+    log = FORWARD / "completeness.csv"
+    new = not log.exists()
+    with open(log, "a") as f:
+        if new:
+            f.write("date,scraped_on,lead_days,airports,departures\n")
+        for d in dates:
+            p = FORWARD_DAYS / f"{d}.json.gz"
+            if not p.exists():
+                print(f"! {d}: no board file, not recorded")
+                continue
+            board = json.load(gzip.open(p, "rt", encoding="utf-8"))
+            lead = (dt.date.fromisoformat(d) - dt.date.fromisoformat(today)).days
+            f.write(f"{d},{today},{lead},{len(board['flights'])},{sum(len(v) for v in board['flights'].values())}\n")
+            state.setdefault(d, []).append(today)
+    # forget dates that have fallen out of the window
+    keep = set(forward_targets())
+    state = {d: v for d, v in sorted(state.items()) if d in keep}
+    (FORWARD / "state.json").write_text(json.dumps(state, indent=1, sort_keys=True))
+
+
+def forward_assemble():
+    import csv
+    by_week = defaultdict(list)
+    for p in sorted(FORWARD_DAYS.glob("????-??-??.json.gz")):
+        d = dt.date.fromisoformat(p.name[:10])
+        by_week[(d - dt.timedelta(d.weekday())).isoformat()].append(p)
+    FORWARD.mkdir(exist_ok=True)
+    weeks = 0
+    with gzip.open(FORWARD / "routes_by_month.csv.gz", "wt", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["week_start", "origin", "destination", "carrier", "flights"])
+        for start, files in sorted(by_week.items()):
+            if len(files) != 7:
+                continue                      # a sample week counts only once all 7 days are in
+            weeks += 1
+            counts = defaultdict(int)
+            for p in files:
+                for origin, rows in json.load(gzip.open(p, "rt", encoding="utf-8"))["flights"].items():
+                    for dest, carrier, *_ in rows:
+                        counts[(origin, dest, carrier)] += 1
+            for (o, d, c), n in sorted(counts.items()):
+                w.writerow([start, o, d, c, n])
+    print(f"forward-assemble: {weeks} complete sample weeks")
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
     only = None
@@ -192,6 +285,19 @@ if __name__ == "__main__":
     session = requests.Session(impersonate="chrome")
     listed = airport_list(session)
     cmd = args[0] if args else "day"
+    if cmd == "forward-plan":
+        print(" ".join(forward_plan(int(args[1]) if len(args) > 1 else 3)))
+        sys.exit(0)
+    if cmd == "forward-done":
+        forward_done(args[1:])
+        sys.exit(0)
+    if cmd == "forward-assemble":
+        forward_assemble()
+        sys.exit(0)
+    if cmd == "forward-day":
+        ok = all([scrape_day(session, listed, d, only, out_dir=FORWARD_DAYS) for d in args[1:]])
+        sys.stdout.flush()
+        os._exit(0 if ok else 1)
     if cmd == "day":
         dates = args[1:] or [(dt.date.today() + dt.timedelta(7)).isoformat()]
         ok = all([scrape_day(session, listed, d, only) for d in dates])

@@ -21,6 +21,14 @@ split by operating carrier (`carriers[].flights_per_week`, with flight numbers),
 `operating_days` and the median block time `min`. Carriers are IATA codes only (no
 ICAO, names or flags); airports carry no ICAO code.
 
+The site also publishes schedules about 11 months ahead. The daily run refreshes four
+forward dates as well, so one full sample week per month (Monday to Sunday, from the
+first Monday on or after the 8th) fills in over a few weeks and then keeps refreshing,
+oldest first. Forward boards are release assets (`forward-boards`, replaced on each
+refresh); `forward/routes_by_month.csv.gz` (assembled Sundays) has each sample week's
+flights per route and carrier, and `forward/completeness.csv` logs every scrape's
+totals by lead time, which measures how complete far-out schedules are.
+
 Example entry
 -------------
 ```JSON
