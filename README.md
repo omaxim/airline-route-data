@@ -11,6 +11,16 @@ A nice map of the data
 ----------------------
 <img src="https://raw.githubusercontent.com/Jonty/airline-route-data/master/map.png">
 
+How it is collected (since October 2026)
+-----------------------------------------
+flightsfrom.com's redesign removed the route data from its destinations pages. The
+scraper now reads each airport's departures board (`/<IATA>/departures?departureDate=`),
+one date a day a week ahead (`days/<date>.json.gz`), and on Sundays adds up the latest
+7 days: each route's `flights_per_week` is the count of scheduled departures that week,
+split by operating carrier (`carriers[].flights_per_week`, with flight numbers), plus
+`operating_days` and the median block time `min`. Carriers are IATA codes only (no
+ICAO, names or flags); airports carry no ICAO code.
+
 Example entry
 -------------
 ```JSON

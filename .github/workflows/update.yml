@@ -1,8 +1,24 @@
 name: Update airline route data
+# Daily: one date's departures board for every airport (days/<date>.json.gz, a week
+# ahead). Sundays: the latest 7 consecutive days assembled into airline_routes.json,
+# the weekly snapshot consumers sync. A manual run can take explicit dates (to fill
+# a gap) and/or force the assembly.
 on:
   schedule:
-    - cron: '0 0 * * 0'
+    - cron: '30 0 * * *'
   workflow_dispatch:
+    inputs:
+      dates:
+        description: 'Dates to scrape, space separated (YYYY-MM-DD); empty = 7 days ahead'
+        required: false
+        default: ''
+      assemble:
+        description: 'Assemble airline_routes.json from the latest 7 days after scraping'
+        type: boolean
+        default: false
+concurrency:
+  group: scrape
+  cancel-in-progress: false
 jobs:
   scrape-and-commit:
     runs-on: ubuntu-latest
@@ -18,50 +34,57 @@ jobs:
 
       # flightsfrom sits behind Cloudflare, which blocks datacenter IPs (incl.
       # GitHub runners). Route the runner through a home WireGuard tunnel so it
-      # exits from a residential IP that Cloudflare waves through. The whole
-      # client config is stored in the WIREGUARD_CONF repo secret.
+      # exits from a residential IP. The whole client config is stored in the
+      # WIREGUARD_CONF repo secret.
       - name: Connect home WireGuard (residential exit IP)
         run: |
           sudo apt-get update
           sudo apt-get install -y wireguard-tools
-          # write config, drop DNS= lines (avoids needing resolvconf on runner)
           printf '%s\n' "${{ secrets.WIREGUARD_CONF }}" \
             | grep -vi '^[[:space:]]*DNS' | sudo tee /etc/wireguard/wg0.conf >/dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
-          # The tunnel routes IPv4 only (AllowedIPs 0.0.0.0/0). GitHub runners
-          # have native IPv6, so traffic can leak out the runner's native
-          # (datacenter) IPv6 and get Cloudflare-blocked. Disable IPv6 so ALL
-          # traffic (incl. the scraper's) is forced through the v4 tunnel.
+          # IPv4-only tunnel: disable IPv6 so nothing leaks out the runner's own address.
           sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
           sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null
           sudo wg-quick up wg0
           sleep 3
           hs=$(sudo wg show wg0 latest-handshakes | awk '{print $2}' | head -1)
           echo "WireGuard handshake: $([ "${hs:-0}" -gt 0 ] && echo OK || echo NONE)"
-          # ISP name only (no IP) — confirms residential vs datacenter exit.
           echo "Exit ISP: $(curl -4 -s --max-time 20 https://ipinfo.io/org || echo unknown)"
-          # Real Cloudflare test: curl_cffi with Chrome's TLS fingerprint, like
-          # the scraper. Plain curl is fingerprint-blocked even from a
-          # residential IP, so it would be a false negative here.
           uv run --python 3.10 --with curl_cffi --with typing_extensions python -c "import sys; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code); sys.exit(0 if r.status_code==200 else 1)"
 
-      - name: Scrape and commit
+      - name: Scrape the day(s)
         run: |
           uv run --python 3.10 --with-requirements requirements.txt -- \
-            python -u scrape_airline_routes.py
+            python -u scrape_airline_routes.py day ${{ github.event.inputs.dates }}
 
-          git config --global user.email "bot@jonty.co.uk"
-          git config --global user.name "Airline Route Update GHA"
-          git add airline_routes.json
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
+      - name: Assemble the week (Sundays, or on request)
+        run: |
+          if [ "${{ github.event.inputs.assemble }}" = "true" ] || [ "$(date -u +%u)" = "7" ]; then
+            uv run --python 3.10 --with-requirements requirements.txt -- \
+              python -u scrape_airline_routes.py assemble
           else
-            git commit -m "Automatic airline route update"
+            echo "Not Sunday: no weekly assembly."
           fi
 
       - name: Disconnect WireGuard
         if: always()
         run: sudo wg-quick down wg0 || true
+
+      - name: Commit
+        run: |
+          git config --global user.email "bot@jonty.co.uk"
+          git config --global user.name "Airline Route Update GHA"
+          # keep three weeks of daily boards
+          ls days/????-??-??.json.gz 2>/dev/null | sort | head -n -21 | xargs -r git rm -q
+          git add days airline_routes.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          elif git diff --cached --name-only | grep -qx airline_routes.json; then
+            git commit -m "Automatic airline route update"
+          else
+            git commit -m "Departures boards: $(git diff --cached --name-only | grep -o '[0-9-]\{10\}' | tr '\n' ' ')"
+          fi
 
       - name: Push changes
         uses: ad-m/github-push-action@master
