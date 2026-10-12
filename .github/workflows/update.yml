@@ -16,6 +16,10 @@ on:
         description: 'Assemble airline_routes.json from the latest 7 days after scraping'
         type: boolean
         default: false
+      only:
+        description: 'Test: only these airports (space separated IATA); writes a sample, commits nothing'
+        required: false
+        default: ''
 concurrency:
   group: scrape
   cancel-in-progress: false
@@ -40,8 +44,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y wireguard-tools
+          # Tunnel only flightsfrom.com (and the exit check), not the runner's own traffic:
+          # with AllowedIPs 0.0.0.0/0 the runner's link to GitHub also went through the home
+          # line, and on 12 Oct a step stayed "in progress" for 30 minutes after it had finished.
+          ips=$( (getent ahostsv4 www.flightsfrom.com; getent ahostsv4 flightsfrom.com; getent ahostsv4 ipinfo.io) \
+                 | awk '{print $1"/32"}' | sort -u | paste -sd, -)
+          echo "Tunnelled: $ips"
           printf '%s\n' "${{ secrets.WIREGUARD_CONF }}" \
-            | grep -vi '^[[:space:]]*DNS' | sudo tee /etc/wireguard/wg0.conf >/dev/null
+            | grep -vi '^[[:space:]]*DNS' \
+            | sed -E "s#^([[:space:]]*AllowedIPs[[:space:]]*=).*#\\1 ${ips}#I" \
+            | sudo tee /etc/wireguard/wg0.conf >/dev/null
           sudo chmod 600 /etc/wireguard/wg0.conf
           # IPv4-only tunnel: disable IPv6 so nothing leaks out the runner's own address.
           sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null
@@ -58,7 +70,7 @@ jobs:
       - name: Scrape the day(s)
         run: |
           uv run --python 3.10 --with-requirements requirements.txt -- \
-            python -u scrape_airline_routes.py day ${{ github.event.inputs.dates }}
+            python -u scrape_airline_routes.py day ${{ github.event.inputs.dates }} ${{ github.event.inputs.only && format('--only {0}', github.event.inputs.only) || '' }}
 
       - name: Assemble the week (Sundays, or on request)
         run: |
@@ -74,6 +86,7 @@ jobs:
         run: sudo wg-quick down wg0 || true
 
       - name: Commit
+        if: github.event.inputs.only == ''
         run: |
           git config --global user.email "bot@jonty.co.uk"
           git config --global user.name "Airline Route Update GHA"
@@ -89,6 +102,7 @@ jobs:
           fi
 
       - name: Push changes
+        if: github.event.inputs.only == ''
         uses: ad-m/github-push-action@master
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
