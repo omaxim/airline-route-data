@@ -16,10 +16,16 @@ on:
         description: 'Assemble airline_routes.json from the latest 7 days after scraping'
         type: boolean
         default: false
+      forward:
+        description: 'Forward schedule dates to refresh this run (0 = none)'
+        required: false
+        default: '4'
       only:
         description: 'Test: only these airports (space separated IATA); writes a sample, commits nothing'
         required: false
         default: ''
+permissions:
+  contents: write        # commits, and the forward-boards release
 concurrency:
   group: scrape
   cancel-in-progress: false
@@ -67,16 +73,45 @@ jobs:
           # check printed HTTP 200 and then held the step for 28 minutes)
           timeout 120 uv run --python 3.10 --with curl_cffi --with typing_extensions python -c "import os; from curl_cffi import requests; r=requests.get('https://www.flightsfrom.com/airports', impersonate='chrome', timeout=30); print('flightsfrom via curl_cffi -> HTTP', r.status_code, flush=True); os._exit(0 if r.status_code==200 else 1)"
 
-      - name: Scrape the day(s)
+      # The near-term day and the forward dates due (one sample week per month, ~11 months
+      # ahead, refreshed oldest first) are scraped as parallel streams, one per date.
+      - name: Scrape the day(s) and the forward dates due
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          uv run --python 3.10 --with-requirements requirements.txt -- \
-            python -u scrape_airline_routes.py day ${{ github.event.inputs.dates }} ${{ github.event.inputs.only && format('--only {0}', github.event.inputs.only) || '' }}
+          RUN="uv run --python 3.10 --with-requirements requirements.txt -- python -u scrape_airline_routes.py"
+          ONLY="${{ github.event.inputs.only && format('--only {0}', github.event.inputs.only) || '' }}"
+          N="${{ github.event.inputs.forward || '4' }}"
+          [ -n "$ONLY" ] && N=0
+          FWD=$( [ "$N" -gt 0 ] && $RUN forward-plan $N || true )
+          echo "Forward dates due: ${FWD:-none}"
+          $RUN day ${{ github.event.inputs.dates }} $ONLY > near.log 2>&1 & near=$!
+          pids=()
+          for d in $FWD; do $RUN forward-day $d > fwd_$d.log 2>&1 & pids+=($!); done
+          ok=0; wait $near || ok=1
+          for p in "${pids[@]}"; do wait $p || true; done
+          tail -n 3 near.log fwd_*.log 2>/dev/null || true
+          done_dates=""
+          for d in $FWD; do [ -f forward_days/$d.json.gz ] && done_dates="$done_dates $d"; done
+          if [ -n "$done_dates" ]; then
+            gh release view forward-boards >/dev/null 2>&1 || \
+              gh release create forward-boards --title "Forward schedule boards" \
+                --notes "Departures boards of the forward sample weeks (replaced on every refresh). See README."
+            for d in $done_dates; do gh release upload forward-boards forward_days/$d.json.gz --clobber; done
+            $RUN forward-done $done_dates
+          fi
+          exit $ok
 
-      - name: Assemble the week (Sundays, or on request)
+      - name: Assemble the week and the forward months (Sundays, or on request)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event.inputs.assemble }}" = "true" ] || [ "$(date -u +%u)" = "7" ]; then
-            uv run --python 3.10 --with-requirements requirements.txt -- \
-              python -u scrape_airline_routes.py assemble
+            RUN="uv run --python 3.10 --with-requirements requirements.txt -- python -u scrape_airline_routes.py"
+            $RUN assemble
+            mkdir -p forward_days
+            gh release download forward-boards --dir forward_days --pattern '*.json.gz' --clobber || true
+            $RUN forward-assemble
           else
             echo "Not Sunday: no weekly assembly."
           fi
@@ -92,13 +127,13 @@ jobs:
           git config --global user.name "Airline Route Update GHA"
           # keep three weeks of daily boards
           ls days/????-??-??.json.gz 2>/dev/null | sort | head -n -21 | xargs -r git rm -q
-          git add days airline_routes.json
+          git add days airline_routes.json forward
           if git diff --cached --quiet; then
             echo "No changes to commit."
           elif git diff --cached --name-only | grep -qx airline_routes.json; then
             git commit -m "Automatic airline route update"
           else
-            git commit -m "Departures boards: $(git diff --cached --name-only | grep -o '[0-9-]\{10\}' | tr '\n' ' ')"
+            git commit -m "Departures boards: $(git diff --cached --name-only | grep -o '[0-9-]\{10\}' | sort -u | tr '\n' ' ')"
           fi
 
       - name: Push changes
