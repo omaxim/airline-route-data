@@ -64,6 +64,11 @@ PAUSE = 1.0               # seconds between pages, ONE stream only (the pace the
                           # ran at for years); 7 parallel streams (~5 pages/s) got this
                           # scraper's IP blocked on 12 Oct 2026
 DEADLINE = float(os.environ.get("SCRAPE_DEADLINE") or 0)   # epoch seconds: stop cleanly before it
+# The site's protection cut a connection off after ~3,200-3,400 pages (~70 min) on 12-13 Oct
+# 2026, at one page a second as at seven streams. Stay well under it: at most this many pages
+# per run (all dates together), then stop cleanly and resume next run.
+PAGE_CAP = int(os.environ.get("SCRAPE_PAGE_CAP") or 2500)
+_pages = 0
 CHECKPOINT = 200          # save progress every N airports, so a stop loses nothing
 
 
@@ -166,8 +171,12 @@ def scrape_day(session, listed, date, only=None, out_dir=None):
         seen.add(iata)
         print(f"{date} #{len(flights)}: {iata}")
         try:
+            global _pages
             if DEADLINE and time.time() > DEADLINE:
                 raise OutOfTime(f"deadline reached at {iata}")
+            if _pages >= PAGE_CAP:
+                raise OutOfTime(f"page cap ({PAGE_CAP}) reached at {iata}")
+            _pages += 1
             rows = board(session, iata, date)
         except (Blocked, OutOfTime) as e:
             seen.discard(iata)

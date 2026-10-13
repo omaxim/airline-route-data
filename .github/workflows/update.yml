@@ -5,8 +5,8 @@ name: Update airline route data
 # a gap) and/or force the assembly.
 on:
   schedule:
-    - cron: '30 0 * * *'     # near-term day + 1 forward date
-    - cron: '30 12 * * *'    # 2 forward dates
+    - cron: '30 0 * * *'     # the near-term day, up to the page cap
+    - cron: '30 12 * * *'    # finishes it (resumes the partial)
   workflow_dispatch:
     inputs:
       dates:
@@ -86,8 +86,11 @@ jobs:
           ONLY="${{ github.event.inputs.only && format('--only {0}', github.event.inputs.only) || '' }}"
           # stop cleanly ~25 min before the job timeout, so the commit step still runs
           export SCRAPE_DEADLINE=$(( $(date +%s) + 300*60 ))
-          AFTERNOON=$([ "${{ github.event.schedule }}" = "30 12 * * *" ] && echo 1 || echo 0)
-          N="${{ github.event.inputs.forward }}"; [ -z "$N" ] && N=$([ $AFTERNOON = 1 ] && echo 2 || echo 1)
+          # Forward fill paused (13 Oct 2026): at ~2,500 pages a run the site's limit leaves no
+          # room for it beyond the near-term day. Both runs do the near-term day (the second
+          # resumes the first's partial file); forward dates only when dispatched explicitly.
+          AFTERNOON=0
+          N="${{ github.event.inputs.forward }}"; [ -z "$N" ] && N=0
           [ -n "$ONLY" ] && N=0
           set +e
           rc=0
