@@ -42,6 +42,7 @@ import datetime as dt
 import gzip
 import json
 import os
+import random
 import re
 import statistics
 import sys
@@ -60,9 +61,10 @@ HORIZON_DAYS = 330                    # the site's schedules reach ~11 months ah
 FORMAT = "flightsfrom-departures-2026-10"
 MAX_ATTEMPTS = 4          # per page
 MAX_FAILED_SHARE = 0.03   # a day with more failed airports than this is not saved
-PAUSE = 1.5               # seconds between pages, ONE stream only (the pace the weekly scraper
-                          # ran at for years); 7 parallel streams (~5 pages/s) got this
-                          # scraper's IP blocked on 12 Oct 2026
+PAUSE = 1.5               # mean seconds between pages, ONE stream only. Each pause is
+                          # PAUSE x U(0.5, 1.5), as Scrapy's RANDOMIZE_DOWNLOAD_DELAY: same
+                          # average pace. 7 parallel streams (~5 pages/s) got this scraper's
+                          # IP blocked on 12 Oct 2026
 DEADLINE = float(os.environ.get("SCRAPE_DEADLINE") or 0)   # epoch seconds: stop cleanly before it
 # The site's protection cut a connection off after ~3,200-3,400 pages (~70 min) on 12-13 Oct
 # 2026, at one page a second as at seven streams. Stay well under it: at most this many pages
@@ -135,7 +137,7 @@ def board(session, iata, date):
             raise
         except Exception as e:
             print(f"! {iata} {date}: {e} (attempt {attempt}/{MAX_ATTEMPTS})")
-        time.sleep(5 * attempt)
+        time.sleep(5 * attempt * random.uniform(0.5, 1.5))   # backoff with jitter
     return None
 
 
@@ -197,7 +199,7 @@ def scrape_day(session, listed, date, only=None, out_dir=None, airports=None, pa
             queue.extend(d for d, *_ in rows if d not in seen)
         if not only and len(flights) % CHECKPOINT == 0:
             _save(part, date, flights, failed, partial=True)
-        time.sleep(PAUSE)
+        time.sleep(PAUSE * random.uniform(0.5, 1.5))
     if blocked:
         if not only:
             _save(part, date, flights, failed, partial=True)
