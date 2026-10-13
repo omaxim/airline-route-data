@@ -142,7 +142,9 @@ jobs:
           git config --global user.name "Airline Route Update GHA"
           # keep three weeks of daily boards
           ls days/????-??-??.json.gz 2>/dev/null | sort | head -n -21 | xargs -r git rm -q
-          git add days airline_routes.json forward
+          # only paths that exist: `git add forward` before the first forward date failed the
+          # whole step on 12 Oct and lost a saved partial day
+          for p in days airline_routes.json forward; do [ -e "$p" ] && git add "$p"; done
           if git diff --cached --quiet; then
             echo "No changes to commit."
           elif git diff --cached --name-only | grep -qx airline_routes.json; then
