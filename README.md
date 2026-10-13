@@ -21,14 +21,17 @@ split by operating carrier (`carriers[].flights_per_week`, with flight numbers),
 `operating_days` and the median block time `min`. Carriers are IATA codes only (no
 ICAO, names or flags); airports carry no ICAO code.
 
-The site also publishes schedules about 11 months ahead. Two daily runs refresh three
-forward dates as well (one page at a time: 00:30 UTC the near-term day then one forward
-date, 12:30 UTC two forward dates), so one full sample week per month (Monday to Sunday, from the
-first Monday on or after the 8th) fills in over a few weeks and then keeps refreshing,
-oldest first. Forward boards are release assets (`forward-boards`, replaced on each
-refresh); `forward/routes_by_month.csv.gz` (assembled Sundays) has each sample week's
+The site also publishes schedules about 11 months ahead. One full sample week per month
+(Monday to Sunday, from the first Monday on or after the 8th) is collected for the
+largest airports carrying 90% of departures (~890 boards a date), after the near-term
+day, and kept refreshing oldest first. Forward boards are release assets
+(`forward-boards`); `forward/routes_by_month.csv.gz` (Sundays) has each sample week's
 flights per route and carrier, and `forward/completeness.csv` logs every scrape's
 totals by lead time, which measures how complete far-out schedules are.
+
+Load: the site cut sessions off after ~70 minutes (Oct 2026). Runs are four a day, six
+hours apart, each at most 1,500 pages or 45 minutes, one page every 1.5 s; any block
+(HTTP 403/429) stops the run, progress is saved and resumed by the next run.
 
 Example entry
 -------------
