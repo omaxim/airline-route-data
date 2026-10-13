@@ -60,14 +60,15 @@ HORIZON_DAYS = 330                    # the site's schedules reach ~11 months ah
 FORMAT = "flightsfrom-departures-2026-10"
 MAX_ATTEMPTS = 4          # per page
 MAX_FAILED_SHARE = 0.03   # a day with more failed airports than this is not saved
-PAUSE = 1.0               # seconds between pages, ONE stream only (the pace the weekly scraper
+PAUSE = 1.5               # seconds between pages, ONE stream only (the pace the weekly scraper
                           # ran at for years); 7 parallel streams (~5 pages/s) got this
                           # scraper's IP blocked on 12 Oct 2026
 DEADLINE = float(os.environ.get("SCRAPE_DEADLINE") or 0)   # epoch seconds: stop cleanly before it
 # The site's protection cut a connection off after ~3,200-3,400 pages (~70 min) on 12-13 Oct
 # 2026, at one page a second as at seven streams. Stay well under it: at most this many pages
 # per run (all dates together), then stop cleanly and resume next run.
-PAGE_CAP = int(os.environ.get("SCRAPE_PAGE_CAP") or 2500)
+PAGE_CAP = int(os.environ.get("SCRAPE_PAGE_CAP") or 1500)
+FORWARD_COVERAGE = 0.90   # forward dates: the largest airports carrying this share of departures
 _pages = 0
 CHECKPOINT = 200          # save progress every N airports, so a stop loses nothing
 
@@ -146,23 +147,29 @@ def _save(path, date, flights, failed, partial):
     tmp.replace(path)
 
 
-def scrape_day(session, listed, date, only=None, out_dir=None):
+def scrape_day(session, listed, date, only=None, out_dir=None, airports=None, partial_dir=None):
     """One date's board for every airport. Resumes from a saved partial file, checkpoints
     every CHECKPOINT airports, and stops at once if the site blocks us (the partial file
     stays, to be resumed by the next run)."""
     out = out_dir or DAYS
     out.mkdir(exist_ok=True)
     path = out / (f"{date}.json.gz" if not only else f"{date}_sample.json.gz")
-    part = out / f"{date}.partial.json.gz"
+    pdir = partial_dir or out
+    pdir.mkdir(parents=True, exist_ok=True)
+    part = pdir / f"{date}.partial.json.gz"
+    if path.exists() and not only:
+        print(f"{date}: already complete ({path}), skipped")
+        return True
     flights, failed = {}, []
     if part.exists() and not only:
         prev = json.load(gzip.open(part, "rt", encoding="utf-8"))
         flights, failed = prev["flights"], prev["failed"]
         print(f"{date}: resuming, {len(flights)} airports already done")
     seen = set(flights) | set(failed)
-    queue = list(only or [i for i, a in listed.items() if a.get("no_routes", 1)])
-    for rows in flights.values():
-        queue.extend(d for d, *_ in rows)
+    queue = list(only or airports or [i for i, a in listed.items() if a.get("no_routes", 1)])
+    if not airports:
+        for rows in flights.values():
+            queue.extend(d for d, *_ in rows)
     blocked = None
     while queue:
         iata = queue.pop()
@@ -186,7 +193,7 @@ def scrape_day(session, listed, date, only=None, out_dir=None):
             failed.append(iata)
             continue
         flights[iata] = rows
-        if not only:   # destinations the list does not name still get their own board
+        if not only and not airports:   # destinations the list does not name get their own board
             queue.extend(d for d, *_ in rows if d not in seen)
         if not only and len(flights) % CHECKPOINT == 0:
             _save(part, date, flights, failed, partial=True)
@@ -205,6 +212,12 @@ def scrape_day(session, listed, date, only=None, out_dir=None):
         print(f"{date}: too many failures ({len(failed)}/{len(seen)}), not saved")
         return False
     _save(path, date, flights, failed, partial=False)
+    if airports:
+        meta = json.load(gzip.open(path, "rt", encoding="utf-8"))
+        meta["airport_set"] = {"basis": f"largest airports carrying {FORWARD_COVERAGE:.0%} of departures",
+                               "n": len(airports)}
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            json.dump(meta, f, separators=(",", ":"))
     part.unlink(missing_ok=True)
     return True
 
@@ -280,11 +293,27 @@ def _state():
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def forward_airports():
+    """The largest airports carrying FORWARD_COVERAGE of weekly departures in the latest
+    snapshot (airline_routes.json, either format): a forward date costs ~900 pages, not ~4,100."""
+    snap = json.load(open("airline_routes.json"))
+    dep = sorted(((sum(r.get("flights_per_week") or 0 for r in a.get("routes", [])), k) for k, a in snap.items()),
+                 reverse=True)
+    total, acc, out = sum(x for x, _ in dep), 0, []
+    for x, k in dep:
+        if acc >= FORWARD_COVERAGE * total:
+            break
+        out.append(k)
+        acc += x
+    return out
+
+
 def forward_plan(n):
     state = _state()
     targets = forward_targets()
-    # never scraped first (nearest first), then the least recently scraped
-    return sorted(targets, key=lambda d: (bool(state.get(d)), (state.get(d) or [""])[-1], d))[:n]
+    started = {p.name[:10] for p in (FORWARD / "partial").glob("*.partial.json.gz")}
+    # a date already started first, then never scraped (nearest first), then the least recently scraped
+    return sorted(targets, key=lambda d: (d not in started, bool(state.get(d)), (state.get(d) or [""])[-1], d))[:n]
 
 
 def forward_done(dates):
@@ -354,8 +383,11 @@ if __name__ == "__main__":
         forward_assemble()
         sys.exit(0)
     if cmd == "forward-day":
+        top = forward_airports()
+        print(f"forward airports: {len(top)} (largest, {FORWARD_COVERAGE:.0%} of departures)")
         try:
-            ok = all([scrape_day(session, listed, d, only, out_dir=FORWARD_DAYS) for d in args[1:]])
+            ok = all([scrape_day(session, listed, d, only, out_dir=FORWARD_DAYS, airports=None if only else top,
+                                 partial_dir=FORWARD / "partial") for d in args[1:]])
         except Blocked:
             sys.stdout.flush()
             os._exit(3)

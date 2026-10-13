@@ -5,8 +5,9 @@ name: Update airline route data
 # a gap) and/or force the assembly.
 on:
   schedule:
-    - cron: '30 0 * * *'     # the near-term day, up to the page cap
-    - cron: '30 12 * * *'    # finishes it (resumes the partial)
+    # Four short, gentle runs a day, six hours apart: each stops at 1,500 pages or 45 minutes
+    # (the site cut sessions off after ~70 min). The near-term day first, then forward dates.
+    - cron: '30 0,6,12,18 * * *'
   workflow_dispatch:
     inputs:
       dates:
@@ -33,7 +34,7 @@ concurrency:
 jobs:
   scrape-and-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,12 +86,9 @@ jobs:
           RUN="uv run --python 3.10 --with-requirements requirements.txt -- python -u scrape_airline_routes.py"
           ONLY="${{ github.event.inputs.only && format('--only {0}', github.event.inputs.only) || '' }}"
           # stop cleanly ~25 min before the job timeout, so the commit step still runs
-          export SCRAPE_DEADLINE=$(( $(date +%s) + 300*60 ))
-          # Forward fill paused (13 Oct 2026): at ~2,500 pages a run the site's limit leaves no
-          # room for it beyond the near-term day. Both runs do the near-term day (the second
-          # resumes the first's partial file); forward dates only when dispatched explicitly.
+          export SCRAPE_DEADLINE=$(( $(date +%s) + 45*60 ))
           AFTERNOON=0
-          N="${{ github.event.inputs.forward }}"; [ -z "$N" ] && N=0
+          N="${{ github.event.inputs.forward }}"; [ -z "$N" ] && N=1
           [ -n "$ONLY" ] && N=0
           set +e
           rc=0
@@ -98,16 +96,19 @@ jobs:
             $RUN day ${{ github.event.inputs.dates }} $ONLY; rc=$?
             if [ $rc -eq 3 ]; then echo "::warning::Blocked by the site: stopping this run."; exit 0; fi
             [ $rc -ne 0 ] && echo "::warning::near-term day did not complete (exit $rc)"
-            [ $rc -eq 4 ] && { echo "Out of time: partial kept."; exit 0; }
+            [ $rc -eq 4 ] && { echo "Page cap or time reached: partial kept."; exit 0; }
+            # the near-term day is the priority: no forward work until it is complete
+            [ $rc -ne 0 ] && exit 0
           fi
           FWD=$( [ "$N" -gt 0 ] && $RUN forward-plan $N || true )
           echo "Forward dates due: ${FWD:-none}"
           done_dates=""
           for d in $FWD; do
-            # a forward date takes ~2.5 h: only start one with 160 min left
-            if [ $(( SCRAPE_DEADLINE - $(date +%s) )) -lt $(( 160*60 )) ]; then echo "No time left for $d."; break; fi
+            # partials resume, so a forward date may start with any time left
+            if [ $(( SCRAPE_DEADLINE - $(date +%s) )) -lt $(( 5*60 )) ]; then echo "No time left for $d."; break; fi
             $RUN forward-day $d; frc=$?
             [ $frc -eq 0 ] && done_dates="$done_dates $d"
+            [ $frc -eq 4 ] && { echo "Page cap or time reached: partial kept."; break; }
             if [ $frc -eq 3 ]; then echo "::warning::Blocked by the site: stopping this run."; break; fi
           done
           if [ -n "$done_dates" ]; then
@@ -126,10 +127,10 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.assemble }}" = "true" ] || [ "$(date -u +%u)" = "7" ]; then
             RUN="uv run --python 3.10 --with-requirements requirements.txt -- python -u scrape_airline_routes.py"
-            $RUN assemble
+            $RUN assemble || echo "::warning::weekly assembly skipped (not 7 complete consecutive days yet)"
             mkdir -p forward_days
             gh release download forward-boards --dir forward_days --pattern '*.json.gz' --clobber || true
-            $RUN forward-assemble
+            $RUN forward-assemble || echo "::warning::forward assembly failed"
           else
             echo "Not Sunday: no weekly assembly."
           fi
