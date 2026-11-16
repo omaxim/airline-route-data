@@ -8,9 +8,9 @@ exact schedule: /<IATA>/departures?departureDate=YYYY-MM-DD lists every departur
 that day with its flight number, operating airline (IATA code) and destination. So:
 
     python scrape_airline_routes.py day [YYYY-MM-DD ...]
-        one board per airport for each date (default: 7 days from today), saved as
-        days/<date>.json.gz. Run daily, one date at a time, the load stays at one
-        page per airport per day.
+        one board per airport for each date, saved as days/<date>.json.gz. Default:
+        the date 7 days from today, and every unfinished date still ahead of today
+        (see pending_dates), so a date the page cap cut short is finished by later runs.
     python scrape_airline_routes.py assemble
         the latest 7 consecutive days in days/ -> airline_routes.json: per route the
         flights in that week, per operating carrier, with their flight numbers and
@@ -224,6 +224,24 @@ def scrape_day(session, listed, date, only=None, out_dir=None, airports=None, pa
     return True
 
 
+def pending_dates(today=None, days_dir=None):
+    """The dates a plain `day` run works on, in order.
+
+    A date used to be scraped only on the one day it was a week ahead, so a date the page
+    cap cut short was never finished and no day ever completed (October-November 2026).
+    Now: the new date first if it has not been started (one run gives it the largest
+    airports, 85-89% of departures, so a consumer never meets a date with nothing), then
+    every unfinished date still ahead of today, oldest first, then the new date again."""
+    today = today or dt.date.today()
+    days_dir = days_dir or DAYS
+    new = (today + dt.timedelta(7)).isoformat()
+    done = {p.name[:10] for p in days_dir.glob("????-??-??.json.gz")}
+    started = {p.name[:10] for p in days_dir.glob("????-??-??.partial.json.gz")}
+    unfinished = sorted(d for d in started - done if today.isoformat() < d <= new)
+    out = ([] if new in started | done else [new]) + unfinished
+    return out + ([new] if new not in out and new not in done else [])
+
+
 def _minutes(hhmm, offset):
     h, m = map(int, hhmm.split(":"))
     return h * 60 + m - int(offset or 0)
@@ -399,7 +417,8 @@ if __name__ == "__main__":
         sys.stdout.flush()
         os._exit(0 if ok else 1)
     if cmd == "day":
-        dates = args[1:] or [(dt.date.today() + dt.timedelta(7)).isoformat()]
+        dates = args[1:] or pending_dates()
+        print("dates this run: " + (" ".join(dates) or "none, all complete"))
         try:
             ok = all([scrape_day(session, listed, d, only) for d in dates])
         except Blocked:
@@ -412,6 +431,14 @@ if __name__ == "__main__":
         os._exit(0 if ok else 1)   # curl_cffi can hang the interpreter at shutdown
     if cmd == "assemble":
         files = sorted(p for p in DAYS.glob("????-??-??.json.gz"))[-7:]
+        if len(files) < 7:
+            # Say what is there. With no complete day this used to die on dates[0] with an
+            # IndexError, which the workflow reported as "not 7 complete consecutive days yet".
+            partial = sorted(p.name[:10] for p in DAYS.glob("????-??-??.partial.json.gz"))
+            sys.exit(f"assemble: {len(files)} complete day(s) in {DAYS}/, need 7 consecutive; "
+                     f"{len(partial)} unfinished date(s)"
+                     + (f" ({partial[0]}..{partial[-1]})" if partial else "")
+                     + ". airline_routes.json not written.")
         days = [json.load(gzip.open(p, "rt", encoding="utf-8")) for p in files]
         airports = assemble(listed, days)
         n_routes = sum(len(a["routes"]) for a in airports.values())

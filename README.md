@@ -29,8 +29,18 @@ day, and kept refreshing oldest first. Forward boards are release assets
 flights per route and carrier, and `forward/completeness.csv` logs every scrape's
 totals by lead time, which measures how complete far-out schedules are.
 
-Load: the site cut sessions off after ~70 minutes (Oct 2026). Runs are four a day, six
-hours apart, each at most 1,500 pages or 45 minutes, one page every 1.5 s; any block
+Status (16 November 2026, before unfinished dates were resumed): no date had been completed since the change, so the Sunday
+assembly has not run and `airline_routes.json` is still the 4 October file. A date needs
+about 3,900 boards; a run stops at 1,500 pages and two or three runs land a day; and a date
+is only scraped on the one day it is a week ahead. Every file in `days/` is therefore a
+`<date>.partial.json.gz` holding the 1,500 to 3,500 largest airports (85% to 99.7% of
+departures). `forward/` is empty for the same reason: forward dates wait for a complete
+near-term day. Theia's airline model builds its weekly snapshot from the partial days
+itself (AirlineDataModel, `airline_model/board_snapshot.py`), taking each airport's
+weekday from the newest board that has it.
+
+Load: the site cut sessions off after ~70 minutes (Oct 2026). Runs are six a day, four
+hours apart (GitHub starts about half of them), each at most 1,500 pages or 45 minutes, one page every 1.5 s; any block
 (HTTP 403/429) stops the run, progress is saved and resumed by the next run.
 
 Example entry
