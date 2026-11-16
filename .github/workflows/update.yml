@@ -5,9 +5,12 @@ name: Update airline route data
 # a gap) and/or force the assembly.
 on:
   schedule:
-    # Four short, gentle runs a day, six hours apart: each stops at 1,500 pages or 45 minutes
-    # (the site cut sessions off after ~70 min). The near-term day first, then forward dates.
-    - cron: '30 0,6,12,18 * * *'
+    # Six short, gentle runs a day, four hours apart: each stops at 1,500 pages or 45 minutes
+    # (the site cut sessions off after ~70 min). A date needs ~3,900 boards and GitHub starts
+    # only two or three of four scheduled runs, which left every date unfinished; six slots
+    # at the same per-run limits give the pages a day a date needs. Near-term dates first
+    # (the new one, then unfinished ones), then forward dates.
+    - cron: '30 0,4,8,12,16,20 * * *'
   workflow_dispatch:
     inputs:
       dates:
@@ -127,7 +130,7 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.assemble }}" = "true" ] || [ "$(date -u +%u)" = "7" ]; then
             RUN="uv run --python 3.10 --with-requirements requirements.txt -- python -u scrape_airline_routes.py"
-            $RUN assemble || echo "::warning::weekly assembly skipped (not 7 complete consecutive days yet)"
+            $RUN assemble || echo "::warning::Weekly assembly skipped: fewer than 7 complete consecutive days (see the step log). airline_routes.json was last written on $(git log -1 --format=%cs -- airline_routes.json)."
             mkdir -p forward_days
             gh release download forward-boards --dir forward_days --pattern '*.json.gz' --clobber || true
             $RUN forward-assemble || echo "::warning::forward assembly failed"
@@ -144,8 +147,11 @@ jobs:
         run: |
           git config --global user.email "bot@jonty.co.uk"
           git config --global user.name "Airline Route Update GHA"
-          # keep three weeks of daily boards
-          ls days/????-??-??.json.gz 2>/dev/null | sort | head -n -21 | xargs -r git rm -q
+          # keep four weeks of daily boards, by date. Unfinished dates (*.partial.json.gz)
+          # count too: the old pattern matched complete files only, so partials were never
+          # pruned. Consumers that build weeks from days/ look back three weeks.
+          ls days 2>/dev/null | grep -o '^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' | sort -u | head -n -28 \
+            | while read -r d; do git rm -q --ignore-unmatch "days/$d.json.gz" "days/$d.partial.json.gz"; done
           # only paths that exist: `git add forward` before the first forward date failed the
           # whole step on 12 Oct and lost a saved partial day
           for p in days airline_routes.json forward; do [ -e "$p" ] && git add "$p"; done
